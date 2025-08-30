@@ -4,6 +4,17 @@ use s9_binance_websocket::binance_websocket::{BinanceWebSocket, BinanceWebSocket
 const MAX_STREAMS: u16 = 1024;
 
 fn main() {
+
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
+    //rustls::crypto::ring::default_provider().install_default()
+    //    .expect("Failed to install Rustls provider");
+    rustls::crypto::aws_lc_rs::default_provider().install_default()
+        .expect("Failed to install AWS-LC provider");
+
+    let mut client_handler = MessageHandler;
     let connection = BinanceWebSocketConnection {
         protocol: "wss".to_string(),
         host: "stream.binance.com".to_string(),
