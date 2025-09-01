@@ -11,8 +11,8 @@ fn main() {
 
     //rustls::crypto::ring::default_provider().install_default()
     //    .expect("Failed to install Rustls provider");
-    rustls::crypto::aws_lc_rs::default_provider().install_default()
-        .expect("Failed to install AWS-LC provider");
+    //rustls::crypto::aws_lc_rs::default_provider().install_default()
+    //    .expect("Failed to install AWS-LC provider");
 
     let mut client_handler = MessageHandler;
     let connection = BinanceWebSocketConnection {
