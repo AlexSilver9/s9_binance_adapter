@@ -6,6 +6,6 @@ authors = ["Alexander Silvennoinen <alex@silvennoinen.de>"]
 
 [dependencies]
 s9_binance_websocket = { git = "https://github.com/AlexSilver9/s9_binance_websocket.git" }
-rustls = { version = "0.23.22", default-features = false, features = ["std", "aws_lc_rs"] }
+#rustls = { version = "0.23.22", default-features = false, features = ["std", "aws_lc_rs"] }
 tracing-subscriber = "0.3"
 tracing = "0.1"
