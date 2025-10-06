@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use std::str::Utf8Error;
-use std::sync::{mpsc};
-use std::thread;
-use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use s9_binance_codec::websocket::Trade;
 use s9_binance_websocket::binance_websocket::{BinanceWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, S9WebSocketClientHandler};
 use s9_parquet::{Entry, ParquetWriter, TimestampInfo};
+use std::collections::HashMap;
+use std::str::Utf8Error;
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
+use std::{fs, thread};
 
 const MAX_STREAMS: u16 = 1024;
 
@@ -22,6 +22,7 @@ fn main() {
         let _ = control_tx.send(ControlMessage::Close());
         let control_tx = control_tx.clone();
         thread::spawn(move || {
+            // TODO: Make duration configurable
             println!("Waiting for 5 seconds to force quit...");
             thread::sleep(Duration::from_secs(5));
             println!("Forcing quit...");
@@ -54,9 +55,23 @@ fn main() {
         "ethusdt@trade".to_string(),
         "solusdt@trade".to_string(),
         "adausdt@trade".to_string(),
+        "bnbusdt@trade".to_string(),
+        "xrpusdt@trade".to_string(),
+        "bardusdt@trade".to_string(),
+        "adaeur@trade".to_string(),
+        "dogeusdt@trade".to_string(),
+        "dogeusdt@trade".to_string(),
+        "asterusdc@trade".to_string(),
+        "xplusdc@trade".to_string(),
     ];
 
-    let file_paths: Vec<String> = streams.iter().map(|stream| format!("{}.parquet", stream.replace("@", "."))).collect();
+    if let Err(e) = setup_application_directories() {
+        println!("Error setting up application directories: {}", e);
+        return;
+    }
+
+    let data_dir = "data";
+    let file_paths: Vec<String> = streams.iter().map(|stream| format!("{}/{}.parquet", data_dir, stream.replace("@", "."))).collect();
 
     let mut writers: HashMap<String, ParquetWriter> = HashMap::new();
     for (i, file_path) in file_paths.iter().enumerate() {
@@ -123,8 +138,8 @@ fn main() {
                 }
             }
 
-            let message = std::str::from_utf8(data).unwrap();
-            println!("Received text message: {:?}", message);
+            //let message = std::str::from_utf8(data).unwrap();
+            //println!("Received text message: {:?}", message);
         }
 
         fn on_binary_message(&mut self, data: &[u8]) {
@@ -192,4 +207,15 @@ fn get_timestamp_info() -> Result<TimestampInfo, SystemTimeError> {
         timestamp_sub_sec: duration_since_epoch.subsec_nanos() as i32,
     };
     Ok(timestamp_info)
+}
+
+fn setup_application_directories() -> Result<(), Box<dyn std::error::Error>> {
+    let directories = vec![
+        "data",
+    ];
+    for dir in directories {
+        fs::create_dir_all(dir)?;
+        println!("Created directory: {}", dir);
+    }
+    Ok(())
 }
