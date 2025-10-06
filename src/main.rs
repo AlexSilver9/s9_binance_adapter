@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::str::Utf8Error;
 use std::sync::{mpsc};
-use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use s9_binance_codec::websocket::Trade;
 use s9_binance_websocket::binance_websocket::{BinanceWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, S9WebSocketClientHandler};
 use s9_parquet::{Entry, ParquetWriter, TimestampInfo};
@@ -14,11 +15,18 @@ fn main() {
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let (control_tx, control_rx) = mpsc::channel();
 
     let ctrlc_result = ctrlc::set_handler(move || {
         println!("Received one of SIGINT, SIGTERM and SIGHUP signal, initiating graceful shutdown...");
-        let _ = shutdown_tx.send(ControlMessage::Close());
+        let _ = control_tx.send(ControlMessage::Close());
+        let control_tx = control_tx.clone();
+        thread::spawn(move || {
+            println!("Waiting for 5 seconds to force quit...");
+            thread::sleep(Duration::from_secs(5));
+            println!("Forcing quit...");
+            let _ = control_tx.send(ControlMessage::ForceQuit());
+        });
     });
 
     match ctrlc_result {
@@ -131,6 +139,11 @@ fn main() {
         fn on_error(&mut self, error: String) {
             println!("Error: {}", error);
         }
+
+        fn on_quit(&mut self) {
+            println!("Binance WebSocket quitted");
+            close_parquet_writers(&mut self.writers);
+        }
     }
 
     let result = BinanceWebSocket::connect(config);
@@ -142,7 +155,7 @@ fn main() {
                     let mut handler = MessageHandler{
                         writers,
                     };
-                    ws.run(&mut handler, shutdown_rx);
+                    ws.run(&mut handler, control_rx);
                 }
                 Err(e) => {
                     println!("Error subscribing to streams: {}", e);
@@ -156,7 +169,7 @@ fn main() {
 }
 
 fn close_parquet_writers(writers: &mut HashMap<String, ParquetWriter>) {
-    println!("Closing Parquet writers...");
+    println!("Closing {} Parquet writers...", writers.len());
     for (symbol, writer) in writers.drain() {
         match writer.close() {
             Ok(_) => {
@@ -169,6 +182,7 @@ fn close_parquet_writers(writers: &mut HashMap<String, ParquetWriter>) {
     }
 }
 
+// TODO: Move timestamping to s9_websocket right after recv() and populate it through the trait
 fn get_timestamp_info() -> Result<TimestampInfo, SystemTimeError> {
     let current_system_time = SystemTime::now();
     let duration_since_epoch = current_system_time.duration_since(UNIX_EPOCH)?;
