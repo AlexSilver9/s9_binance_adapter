@@ -45,7 +45,7 @@ impl QueuedParquetWriter {
         }
     }
 
-    pub fn close(mut self) -> anyhow::Result<(), Box<dyn std::error::Error>> {
+    pub fn close(self) -> anyhow::Result<(), Box<dyn std::error::Error>> {
         self.writer.close()
     }
 }

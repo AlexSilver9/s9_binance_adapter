@@ -5,7 +5,7 @@ use s9_binance_websocket::binance_websocket::{BinanceWebSocket, BinanceWebSocket
 use s9_parquet::{Record, TimestampInfo};
 use std::collections::HashMap;
 use std::str::Utf8Error;
-use std::sync::mpsc;
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use std::{fs, thread};
 use crate::queue::QueuedParquetWriter;
@@ -21,7 +21,7 @@ fn main() {
     // TODO: Make configurable with clap
     let max_records_per_parquet_group = 100;
 
-    let (control_tx, control_rx) = mpsc::channel();
+    let (control_tx, control_rx): (Sender<ControlMessage>, Receiver<ControlMessage>) = unbounded();
 
     let ctrlc_result = ctrlc::set_handler(move || {
         println!("Received one of SIGINT, SIGTERM and SIGHUP signal, initiating graceful shutdown...");
