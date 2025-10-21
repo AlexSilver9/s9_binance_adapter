@@ -12,3 +12,4 @@ ctrlc = { version = "3.5", features = ["termination"] }
 #rustls = { version = "0.23.22", default-features = false, features = ["std", "aws_lc_rs"] }
 tracing-subscriber = "0.3"
 tracing = "0.1"
+anyhow = "1.0"

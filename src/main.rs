@@ -1,11 +1,14 @@
+mod queue;
+
 use s9_binance_codec::websocket::Trade;
 use s9_binance_websocket::binance_websocket::{BinanceWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, S9WebSocketClientHandler};
-use s9_parquet::{Entry, ParquetWriter, TimestampInfo};
+use s9_parquet::{Record, TimestampInfo};
 use std::collections::HashMap;
 use std::str::Utf8Error;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use std::{fs, thread};
+use crate::queue::QueuedParquetWriter;
 
 const MAX_STREAMS: u16 = 1024;
 
@@ -14,6 +17,9 @@ fn main() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
+
+    // TODO: Make configurable with clap
+    let max_records_per_parquet_group = 100;
 
     let (control_tx, control_rx) = mpsc::channel();
 
@@ -73,23 +79,23 @@ fn main() {
     let data_dir = "data";
     let file_paths: Vec<String> = streams.iter().map(|stream| format!("{}/{}.parquet", data_dir, stream.replace("@", "."))).collect();
 
-    let mut writers: HashMap<String, ParquetWriter> = HashMap::new();
+    let mut writers: HashMap<String, QueuedParquetWriter> = HashMap::new();
     for (i, file_path) in file_paths.iter().enumerate() {
-        let writer = ParquetWriter::new(file_path);
+        let writer = QueuedParquetWriter::new(file_path, max_records_per_parquet_group);
         match writer {
             Ok(writer) => {
                 let symbol = streams[i].split('@').next().unwrap().to_uppercase();
                 writers.insert(symbol, writer);
             }
             Err(e) => {
-                println!("Error creating Parquet writer for {}: {}", file_path, e);
+                println!("Error creating QueuedParquetWriter for {}: {}", file_path, e);
                 return;
             }
         }
     }
 
     struct MessageHandler {
-        writers: HashMap<String, ParquetWriter>,
+        queued_writers: HashMap<String, QueuedParquetWriter>,
     }
 
     impl S9WebSocketClientHandler for MessageHandler {
@@ -103,27 +109,32 @@ fn main() {
                     let trade = Trade::from_json(utf8);
                     match trade {
                         Ok(trade) => {
-                            let entry = Entry {
+                            let record = Record {
                                 timestamp_info: timestamp_info.clone(),
                                 data: data.to_vec(),
                             };
 
-                            let writer = self.writers.get_mut(&trade.symbol.to_uppercase());
-                            match writer {
-                                Some(writer) => {
-                                    let result = writer.write(&entry);
-                                    let file_path = writer.file_path.to_str().unwrap();
-                                    match result {
-                                        Ok(_) => {
-                                            println!("Wrote entry for {} to parquet file {}: {:?}", trade.symbol, file_path, entry.timestamp_info);
-                                        }
-                                        Err(e) => {
-                                            println!("Error writing parquet entry to {}: {}", trade.symbol, e);
+                            let queued_writer = self.queued_writers.get_mut(&trade.symbol.to_uppercase());
+                            match queued_writer {
+                                Some(queued_writer) => {
+                                    queued_writer.enqueue(record);
+                                    if queued_writer.is_full() {
+                                        let result = queued_writer.flush();
+                                        let file_path = queued_writer.file_path().to_string_lossy().to_string();
+                                        match result {
+                                            Ok(flushed_records_size) => {
+                                                println!("Wrote {} records for {} to parquet file {} at timestamp {:?}",
+                                                         flushed_records_size, trade.symbol, file_path, timestamp_info);
+                                            }
+                                            Err(e) => {
+                                                println!("Error writing records for {} to parquet file {} at timestamp {:?}: {}",
+                                                         trade.symbol, file_path, timestamp_info, e);
+                                            }
                                         }
                                     }
                                 }
                                 None => {
-                                    println!("No parquet writer found for symbol: {}", trade.symbol);
+                                    println!("No QueuedParquetWriter found for symbol: {}", trade.symbol);
                                 }
                             }
 
@@ -148,7 +159,7 @@ fn main() {
 
         fn on_connection_closed(&mut self, reason: Option<String>) {
             println!("Connection closed: {:?}", reason);
-            close_parquet_writers(&mut self.writers);
+            close_parquet_writers(&mut self.queued_writers);
         }
 
         fn on_error(&mut self, error: String) {
@@ -157,7 +168,7 @@ fn main() {
 
         fn on_quit(&mut self) {
             println!("Binance WebSocket quitted");
-            close_parquet_writers(&mut self.writers);
+            close_parquet_writers(&mut self.queued_writers);
         }
     }
 
@@ -168,7 +179,7 @@ fn main() {
             match result {
                 Ok(_) => {
                     let mut handler = MessageHandler{
-                        writers,
+                        queued_writers: writers,
                     };
                     ws.run(&mut handler, control_rx);
                 }
@@ -183,15 +194,29 @@ fn main() {
     }
 }
 
-fn close_parquet_writers(writers: &mut HashMap<String, ParquetWriter>) {
-    println!("Closing {} Parquet writers...", writers.len());
-    for (symbol, writer) in writers.drain() {
-        match writer.close() {
+fn close_parquet_writers(queued_writers: &mut HashMap<String, QueuedParquetWriter>) {
+    println!("Closing {} QueuedParquetWriters ...", queued_writers.len());
+    let timestamp_info = get_timestamp_info().unwrap();
+    for (symbol, mut queued_writer) in queued_writers.drain() {
+        let file_path = queued_writer.file_path().to_string_lossy().to_string();
+        while !queued_writer.is_empty() {
+            match queued_writer.flush() {
+                Ok(flushed_records_size) => {
+                    println!("Wrote {} records for {} to parquet file {} at timestamp {:?}",
+                             flushed_records_size, symbol, file_path, timestamp_info);
+                }
+                Err(e) => {
+                    println!("Error writing records for {} to parquet file {} at timestamp {:?}: {}",
+                             symbol, file_path, timestamp_info, e);
+                }
+            }
+        }
+        match queued_writer.close() {
             Ok(_) => {
-                println!("Closed Parquet writer for {}.", symbol);
+                println!("Closed QueuedParquetWriter for {}.", symbol);
             }
             Err(e) => {
-                println!("Error closing Parquet writer for {}: {}", symbol, e);
+                println!("Error closing QueuedParquetWriter for {}: {}", symbol, e);
             }
         }
     }
