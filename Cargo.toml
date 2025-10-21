@@ -9,6 +9,7 @@ s9_binance_websocket = { git = "https://github.com/AlexSilver9/s9_binance_websoc
 s9_binance_codec = { git = "https://github.com/AlexSilver9/s9_binance_codec.git" }
 s9_parquet = { git = "https://github.com/AlexSilver9/s9_parquet.git" }
 crossbeam-channel = "0.5"
+tiny_http = "0.12"
 ctrlc = { version = "3.5", features = ["termination"] }
 #rustls = { version = "0.23.22", default-features = false, features = ["std", "aws_lc_rs"] }
 tracing-subscriber = "0.3"

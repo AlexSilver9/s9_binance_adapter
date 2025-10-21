@@ -1,0 +1,4 @@
+### POSTS on /shutdown
+POST localhost:8080/shutdown
+
+###
