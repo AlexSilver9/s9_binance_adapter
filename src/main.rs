@@ -1,7 +1,7 @@
 mod queue;
 
 use s9_binance_codec::websocket::Trade;
-use s9_binance_websocket::binance_websocket::{BinanceWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, S9WebSocketClientHandler};
+use s9_binance_websocket::binance_websocket::{BinanceBlockingWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, S9WebSocketClientHandler};
 use s9_parquet::{Record, TimestampInfo};
 use std::collections::HashMap;
 use std::str::Utf8Error;
@@ -20,7 +20,7 @@ fn main() {
         .init();
 
     // TODO: Make configurable with clap
-    let max_records_per_parquet_group = 0;
+    let max_records_per_parquet_group = 128;
     let flush_timeout = Duration::from_secs(5);
 
     let (control_tx, control_rx): (Sender<ControlMessage>, Receiver<ControlMessage>) = unbounded();
@@ -243,16 +243,16 @@ fn main() {
         }
     }
 
-    let result = BinanceWebSocket::connect(config);
+    let result = BinanceBlockingWebSocket::connect(config);
     match result {
         Ok(mut ws) => {
-            let result = ws.subscribe_to_streams(streams);
+            let result = ws.subscribe_to_streams_blocking(streams);
             match result {
                 Ok(_) => {
                     let mut handler = MessageHandler{
                         queued_writers: writers,
                     };
-                    ws.run(&mut handler, control_rx);
+                    ws.run_blocking(&mut handler, control_rx);
                 }
                 Err(e) => {
                     println!("Error subscribing to streams: {}", e);
