@@ -13,7 +13,6 @@ pub enum ControlMessage {
 pub struct ConcurrentQueuedParquetWriter {
     record_tx: Sender<Record>,
     control_tx: Sender<ControlMessage>,
-    error_rx: Receiver<String>,
     queue_size: Arc<AtomicUsize>,
     file_path: PathBuf,
     worker_handle: Option<thread::JoinHandle<()>>,
@@ -24,11 +23,11 @@ impl ConcurrentQueuedParquetWriter {
         file_path: &str,
         capacity: usize,
         flush_timeout: Duration,
+        error_tx: Sender<(String, String)>,
     ) -> anyhow::Result<Self, Box<dyn std::error::Error>>
     {
         let (record_tx, record_rx) = unbounded::<Record>();
         let (control_tx, control_rx) = unbounded::<ControlMessage>();
-        let (error_tx, error_rx) = unbounded::<String>();
 
         let writer = ParquetWriter::new(file_path, capacity)?;
         let queue_size = Arc::new(AtomicUsize::new(0));
@@ -52,7 +51,6 @@ impl ConcurrentQueuedParquetWriter {
         Ok(Self {
             record_tx,
             control_tx,
-            error_rx,
             queue_size,
             file_path: path_buf,
             worker_handle: Some(worker_handle),
@@ -86,10 +84,6 @@ impl ConcurrentQueuedParquetWriter {
     pub fn queue_size(&self) -> usize {
         self.queue_size.load(Ordering::Relaxed)
     }
-
-    pub fn error_receiver(&self) -> &Receiver<String> {
-        &self.error_rx
-    }
 }
 
 fn worker_loop(
@@ -98,12 +92,13 @@ fn worker_loop(
     flush_timeout: Duration,
     record_rx: Receiver<Record>,
     control_rx: Receiver<ControlMessage>,
-    error_tx: Sender<String>,
+    error_tx: Sender<(String, String)>,
     queue_size: Arc<AtomicUsize>,
     file_path: PathBuf,
 ) {
     let mut queue: Vec<Record> = Vec::with_capacity(capacity);
     let mut running = true;
+    let file_path = file_path.to_string_lossy().to_string();
 
     while running {
         select! {
@@ -148,16 +143,16 @@ fn worker_loop(
     }
 
     if let Err(e) = writer.close() {
-        let _ = error_tx.send(format!("Error closing ParquetWriter for {:?}: {}", file_path, e));
+        let _ = error_tx.send((file_path.to_string(), format!("Error closing ParquetWriter for {:?}: {}", file_path, e)));
     }
 }
 
 fn flush_queue(
     writer: &mut ParquetWriter,
     queue: &mut Vec<Record>,
-    error_tx: &Sender<String>,
+    error_tx: &Sender<(String, String)>,
     queue_size: &Arc<AtomicUsize>,
-    file_path: &Path,
+    file_path: &str,
 ) {
     if queue.is_empty() {
         return;
@@ -167,7 +162,7 @@ fn flush_queue(
     let num_records = records_to_write.len();
 
     if let Err(e) = writer.write(&records_to_write) {
-        let _ = error_tx.send(format!("Error writing to Parquet file {:?}: {}", file_path, e));
+        let _ = error_tx.send((file_path.to_string(), format!("Error writing to Parquet file {:?}: {}", file_path, e)));
     }
 
     queue_size.fetch_sub(num_records, Ordering::Relaxed);

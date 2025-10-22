@@ -1,15 +1,13 @@
 mod queue;
 
 use s9_binance_codec::websocket::Trade;
-use s9_binance_websocket::binance_websocket::{BinanceNonBlockingWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, S9WebSocketClientHandler, WebSocketEvent};
+use s9_binance_websocket::binance_websocket::{BinanceNonBlockingWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, WebSocketEvent};
 use s9_parquet::{Record, TimestampInfo};
 use std::collections::HashMap;
 use std::str::Utf8Error;
-use crossbeam_channel::{select, unbounded, Receiver, Sender};
+use crossbeam_channel::{select, unbounded, Sender};
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use std::{fs, thread};
-use std::io::Read;
-use ctrlc::Error;
 use tiny_http::{Method, Response, Server};
 use crate::queue::{ConcurrentQueuedParquetWriter};
 
@@ -63,9 +61,16 @@ fn main() {
     let data_dir = "data";
     let file_paths: Vec<String> = streams.iter().map(|stream| format!("{}/{}.parquet", data_dir, stream.replace("@", "."))).collect();
 
+    let (error_tx, error_rx) = unbounded::<(String, String)>();
+
     let mut writers: HashMap<String, ConcurrentQueuedParquetWriter> = HashMap::new();
     for (i, file_path) in file_paths.iter().enumerate() {
-        let writer = ConcurrentQueuedParquetWriter::new(file_path, max_records_per_parquet_group, flush_timeout);
+        let writer = ConcurrentQueuedParquetWriter::new(
+            file_path,
+            max_records_per_parquet_group,
+            flush_timeout,
+            error_tx.clone(),
+        );
         match writer {
             Ok(writer) => {
                 let symbol = streams[i].split('@').next().unwrap().to_uppercase();
@@ -77,22 +82,6 @@ fn main() {
             }
         }
     }
-
-    let writers_for_error_handling = writers.iter()
-        .map(|(symbol, writer)|
-            (symbol.clone(), writer.error_receiver().clone()))
-        .collect::<Vec<(String, Receiver<String>)>>();
-    thread::spawn(move || {
-        loop {
-            for (symbol, error_receiver) in &writers_for_error_handling {
-                if let Ok(error_message) = error_receiver.try_recv() {
-                    println!("Error from writer for {}: {}", symbol, error_message);
-                }
-            }
-            // TODO: This is non-blocking polling, maybe find a better way that uses event driven style or so
-            thread::sleep(Duration::from_secs(1)); // TODO: Make configurable
-        }
-    });
 
     let result = BinanceNonBlockingWebSocket::connect(config);
     match result {
@@ -121,11 +110,13 @@ fn main() {
                                         if let Err(e) = result {
                                             println!("Error sending close message to chanel, : {}", e);
                                             // TODO: Shutdown writers and application manually here
+                                            close_parquet_writers(&mut writers);
+                                            running = false;
                                         }
                                     }
                                 }
                             },
-                            WebSocketEvent::TextMessage(mut data) => {
+                            WebSocketEvent::TextMessage(data) => {
                                 let timestamp_info = get_timestamp_info().unwrap();
                                 let utf8: Result<&str, Utf8Error> = str::from_utf8(&data);
                                 match utf8 {
@@ -199,137 +190,41 @@ fn main() {
                                 // TODO: shutdown or recover?
                             },
                             WebSocketEvent::Quit => {
-                                println!("Binance WebSocket quitted");
+                                println!("Websocket quitted");
                                 close_parquet_writers(&mut writers);
                                 running = false;
                             },
                             _ => {}
                         },
                         Err(recv_error) => {
-                            println!("Error receiving message from channel: {}", recv_error);
+                            println!("Error receiving message from websocket channel: {}", recv_error);
+                            // TODO: shutdown or recover?
+                        }
+                    },
+                    recv(error_rx) -> msg => match msg {
+                        Ok((file_path, error_message)) => {
+                            println!("Error from writer for file {}: {}", file_path, error_message);
+                            // TODO: shutdown or recover?
+                        }
+                        Err(recv_error) => {
+                            println!("Error receiving error message from writer channel: {}", recv_error);
                             // TODO: shutdown or recover?
                         }
                     }
                 }
             }
+            println!("Main loop finished");
         }
         Err(e) => {
             println!("Error connecting to Binance WebSocket: {}", e);
         }
     };
 
-    /*struct MessageHandler {
-        queued_writers: HashMap<String, ConcurrentQueuedParquetWriter>,
-    }
-
-    impl S9WebSocketClientHandler for MessageHandler {
-        fn on_text_message(&mut self, data: &[u8]) {
-            let timestamp_info = get_timestamp_info().unwrap();
-
-            let utf8: Result<&str, Utf8Error> = str::from_utf8(data);
-            match utf8 {
-                Ok(utf8) => {
-
-                    let trade = Trade::from_json(utf8);
-                    match trade {
-                        Ok(trade) => {
-                            let record = Record {
-                                timestamp_info: timestamp_info.clone(),
-                                data: data.to_vec(),
-                            };
-
-                            let queued_writer = self.queued_writers.get_mut(&trade.symbol.to_uppercase());
-                            match queued_writer {
-                                Some(queued_writer) => {
-                                    let enqueue_result = queued_writer.enqueue(record);
-                                    match enqueue_result {
-                                        Ok(_) => {
-                                            println!("Enqueued records for {} at timestamp {:?}",
-                                                     trade.symbol, timestamp_info);
-                                        }
-                                        Err(e) => {
-                                            println!("Error enqueuing records for {} at timestamp {:?}: {}",
-                                                     trade.symbol, timestamp_info, e);
-                                        }
-                                        
-                                    }
-                                    /*if queued_writer.is_full() {
-                                        let result = queued_writer.flush();
-                                        let file_path = queued_writer.file_path().to_string_lossy().to_string();
-                                        match result {
-                                            Ok(flushed_records_size) => {
-                                                println!("Wrote {} records for {} to parquet file {} at timestamp {:?}",
-                                                         flushed_records_size, trade.symbol, file_path, timestamp_info);
-                                            }
-                                            Err(e) => {
-                                                println!("Error writing records for {} to parquet file {} at timestamp {:?}: {}",
-                                                         trade.symbol, file_path, timestamp_info, e);
-                                            }
-                                        }
-                                    }*/
-                                }
-                                None => {
-                                    println!("No writer found for symbol: {}", trade.symbol);
-                                }
-                            }
-
-                        }
-                        Err(e) => {
-                            println!("Error parsing trade: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    println!("Error parsing text message to utf8 string: {}", e);
-                }
-            }
-
-            //let message = std::str::from_utf8(data).unwrap();
-            //println!("Received text message: {:?}", message);
-        }
-
-        fn on_binary_message(&mut self, data: &[u8]) {
-            println!("Received binary message: {:?}", data);
-        }
-
-        fn on_connection_closed(&mut self, reason: Option<String>) {
-            println!("Connection closed: {:?}", reason);
-            close_parquet_writers(&mut self.queued_writers);
-        }
-
-        fn on_error(&mut self, error: String) {
-            println!("Error: {}", error);
-        }
-
-        fn on_quit(&mut self) {
-            println!("Binance WebSocket quitted");
-            close_parquet_writers(&mut self.queued_writers);
-        }
-    }
-
-    let result = BinanceBlockingWebSocket::connect(config);
-    match result {
-        Ok(mut ws) => {
-            let result = ws.subscribe_to_streams_blocking(streams);
-            match result {
-                Ok(_) => {
-                    let mut handler = MessageHandler{
-                        queued_writers: writers,
-                    };
-                    ws.run_blocking(&mut handler, control_rx);
-                }
-                Err(e) => {
-                    println!("Error subscribing to streams: {}", e);
-                }
-            }
-        }
-        Err(e) => {
-            println!("Error connecting to Binance WebSocket: {}", e);
-        }
-    }*/
+    println!("Main thread finished");
 }
 
 fn setup_ctrlc_handler(control_tx: &Sender<ControlMessage>) {
+    // TODO: Make idempotent
     let ctrlc_tx = control_tx.clone();
     let ctrlc_result = ctrlc::set_handler(move || {
         println!("Received one of SIGINT, SIGTERM and SIGHUP signal, initiating graceful shutdown...");
@@ -353,6 +248,7 @@ fn setup_ctrlc_handler(control_tx: &Sender<ControlMessage>) {
 }
 
 fn setup_http_shutdown_handler(control_tx: &Sender<ControlMessage>) {
+    // TODO: Make idempotent
     let http_control_tx = control_tx.clone();
     thread::spawn(move || {
         let server_addr = "0.0.0.0:8090"; // TODO Make configurable
