@@ -1,7 +1,7 @@
 mod queue;
 
 use s9_binance_codec::websocket::Trade;
-use s9_binance_websocket::binance_websocket::{BinanceNonBlockingWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, WebSocketEvent};
+use s9_binance_websocket::binance_websocket::{BinanceNonBlockingWebSocket, BinanceWebSocketConfig, BinanceWebSocketConnection, ControlMessage, NonBlockingOptions, WebSocketEvent};
 use s9_parquet::{Record, TimestampInfo};
 use std::collections::HashMap;
 use std::str::Utf8Error;
@@ -22,6 +22,17 @@ fn main() {
     // TODO: Make configurable with clap
     let max_records_per_parquet_group = 128;
     let flush_timeout = Duration::from_secs(5);
+
+    // TODO: Make configurable with clap
+    let non_blocking_options = NonBlockingOptions::new(Some(Duration::from_secs(1)));
+    let non_blocking_options = NonBlockingOptions::new(None);
+    let non_blocking_options = match non_blocking_options {
+        Ok(strategy) => strategy,
+        Err(e) => {
+            println!("Error creating NonBlockingStrategy: {}", e);
+            return;
+        }
+    };
 
     //rustls::crypto::ring::default_provider().install_default().expect("Failed to install Rustls provider");
     //rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install AWS-LC provider");
@@ -92,7 +103,11 @@ fn main() {
             setup_ctrlc_handler(&control_tx);
             setup_http_shutdown_handler(&control_tx);
 
-            ws.run_non_blocking();
+            let result = ws.run_non_blocking(non_blocking_options);
+            if let Err(error) = result {
+                println!("Error running non-blocking WebSocket: {}", error);
+                return;
+            }
 
             let mut running = true;
             while running {
